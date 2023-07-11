@@ -13,7 +13,10 @@ use ethers::{
         artifacts::{Ast, CompactBytecode, CompactDeployedBytecode},
         Artifact, Bytes, Project, ProjectCompileOutput, U256,
     },
-    solc::{artifacts::contract::CompactContractBytecode, sourcemap::SourceMap},
+    solc::{
+        artifacts::{contract::CompactContractBytecode, OptimizerDetails, YulDetails},
+        sourcemap::SourceMap,
+    },
 };
 use eyre::Context;
 use forge::{
@@ -45,6 +48,13 @@ pub struct CoverageArgs {
     /// This flag can be used multiple times.
     #[clap(long, value_enum, default_value = "summary")]
     report: Vec<CoverageReportKind>,
+
+    /// Enable viaIR with minimum optimization
+    ///
+    /// This can fix most of the "stack too deep" errors while resulting a
+    /// relatively accurate source map.
+    #[clap(long)]
+    ir_minimum: bool,
 
     #[clap(flatten)]
     filter: FilterArgs,
@@ -96,11 +106,35 @@ impl CoverageArgs {
         let project = {
             let mut project = config.ephemeral_no_artifacts_project()?;
 
-            // Disable the optimizer for more accurate source maps
-            project.solc_config.settings.optimizer.disable();
-            project.solc_config.settings.optimizer.runs = None;
-            project.solc_config.settings.optimizer.details = None;
-            project.solc_config.settings.via_ir = None;
+            if self.ir_minimum {
+                // Enable viaIR with minimum optimization
+                // https://github.com/ethereum/solidity/issues/12533#issuecomment-1013073350
+                // And also in new releases of solidity:
+                // https://github.com/ethereum/solidity/issues/13972#issuecomment-1628632202
+
+                project.solc_config.settings.optimizer.disable(); // disable bytecode optimizer
+                project.solc_config.settings.optimizer.details = Some(OptimizerDetails {
+                    peephole: Some(false),
+                    inliner: Some(false),
+                    jumpdest_remover: Some(false),
+                    order_literals: Some(false),
+                    deduplicate: Some(false),
+                    cse: Some(false),
+                    constant_optimizer: Some(false),
+                    yul: Some(true), // enable yul optimizer
+                    yul_details: Some(YulDetails {
+                        stack_allocation: Some(true),
+                        // with only unused prunner step
+                        optimizer_steps: Some("u".to_string()),
+                    }),
+                });
+                project.solc_config.settings.via_ir = Some(true);
+            } else {
+                project.solc_config.settings.optimizer.disable();
+                project.solc_config.settings.optimizer.runs = None;
+                project.solc_config.settings.optimizer.details = None;
+                project.solc_config.settings.via_ir = None;
+            }
 
             project
         };
